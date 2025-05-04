@@ -535,9 +535,10 @@ def load_and_prepare_datasets() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFram
     # Load configurations and datasets
     conf = Config()
     adversary_dataset = pd.read_csv(conf.get_adversary_mapping())
-    if "hash" in adversary_dataset.columns and "sha256" in adversary_dataset.columns:
-        adversary_dataset = adversary_dataset.drop(columns=['hash'])
-        adversary_dataset = adversary_dataset.rename(columns={'sha256': 'hash'})
+    adversary_dataset['hash'] = adversary_dataset['sha256'].copy()
+    #if "hash" in adversary_dataset.columns and "sha256" in adversary_dataset.columns:
+    #    adversary_dataset = adversary_dataset.drop(columns=['hash'])
+    #    adversary_dataset = adversary_dataset.rename(columns={'sha256': 'hash'})
 
     # Load and normalize Exif and Malcat features
     exif_features = ExifFeatures().get_normalized_features().assign(hash=lambda df: df['hash'].astype(str))

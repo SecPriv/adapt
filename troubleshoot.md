@@ -169,6 +169,16 @@ And finally, the below function performs normalization that includes extracting 
 
 Computing embeddings for a large number of unique strings can consume significant memory, especially on machines without GPUs or with limited VRAM.
 
+Additionally, certain scenarios can greatly increase processing time:
+
+Large Malware Samples: Samples larger than 20 MB and with extensive string content (evidenced by large FLOSS output files) can significantly slow down embedding generation,
+
+Agglomerative Clustering: This step can be computationally expensive, particularly if:
+
+You're clustering a large number of samples, or
+
+You're trying more than ~50 clusters — this can drastically increase runtime due to pairwise distance computations and hierarchical merging.
+
 #### Possible Error:
 
 ```plaintext
@@ -182,6 +192,7 @@ RuntimeError: CUDA out of memory
 - Filter very long strings (e.g., skip strings longer than 2000 characters).
 - Consider switching to a smaller transformer model (e.g., `distilbert` instead of `bert-large`).
 - Run on CPU (slower but safer): comment out `.to(device)` or set `device = torch.device("cpu")`.
+- Pre-filter large samples (e.g., skip samples > 20 MB unless necessary).
 
 Feel free to open issues or pull requests if you encounter any bugs or improvements!
 
