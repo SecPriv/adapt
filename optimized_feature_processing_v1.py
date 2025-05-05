@@ -1669,11 +1669,11 @@ async def process_generic_file(
     vt_meta_file_path = os.path.join(root_dir, vt_meta_file)
 
     # # Sequential processing steps
-    process_document_file(sample_file_path, root_dir)
-    await process_floss_file(sample_file_path, root_dir, floss_executable_path)
-    process_yara_rule(sample_file_path, yara_rules_path, root_dir)
-    process_exiftool(sample_file_path, root_dir)
-    process_lief_features(sample_file_path, root_dir)
+     process_document_file(sample_file_path, root_dir)
+     await process_floss_file(sample_file_path, root_dir, floss_executable_path)
+     process_yara_rule(sample_file_path, yara_rules_path, root_dir)
+     process_exiftool(sample_file_path, root_dir)
+     process_lief_features(sample_file_path, root_dir)
 
     # Conditional asynchronous processing
     if os.path.exists(floss_json_path):

@@ -977,52 +977,51 @@ class DataProcessor():
         return unique_email_dict
 
 
-    def encode_list_of_texts_batched(
-        self,
-        texts: list[str],
-        tokenizer: PreTrainedTokenizer,
-        model: PreTrainedModel,
-        batch_size: int = 256,
-        verbose: bool = False
-    ) -> torch.Tensor:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = model.to(device)
-        model.eval()
+    def encode_list_of_texts_batched(self, texts: list[str], tokenizer: PreTrainedTokenizer, model: PreTrainedModel, batch_size: int = 32) -> torch.Tensor:
+        """Encode a list of text sequences into embeddings using a transformer-based model with batching.
 
+        This function tokenizes the input texts, computes token embeddings, performs mean pooling,
+        and normalizes the resulting embeddings in batches to prevent MemoryError.
+
+        Parameters:
+            texts (List[str]): A list of text sequences to be encoded.
+            tokenizer (PreTrainedTokenizer): The tokenizer associated with the transformer-based model.
+            model (PreTrainedModel): The transformer-based model for encoding text.
+            batch_size (int): The batch size for processing text sequences.
+
+        Returns:
+            Normalized embeddings for the input text sequences.
+        """
+        # Initialize a list to store the embeddings
         embeddings_list = []
-
-        for i in tqdm(range(0, len(texts), batch_size), desc="Encoding batches"):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Process texts in batches
+        for i in tqdm(range(0, len(texts), batch_size)):
             batch_texts = texts[i:i + batch_size]
 
-            # Retry smaller batch on memory error
-            for attempt in [batch_texts, batch_texts[:batch_size // 2], batch_texts[:batch_size // 4]]:
-                try:
-                    encoded_input = tokenizer(attempt, padding=True, truncation=True, return_tensors='pt')
-                    encoded_input = {k: v.to(device) for k, v in encoded_input.items()}
+            # Tokenize sentences for the current batch
+            encoded_input = tokenizer(batch_texts, padding=True, truncation=True, return_tensors='pt').to(device)
 
-                    with torch.no_grad():
-                        model_output = model(**encoded_input, return_dict=True)
+            with torch.no_grad():
+                model_output = model(**encoded_input, return_dict=True)
+            # Perform pooling for the batch
+            batch_embeddings = self.mean_pooling(model_output, encoded_input['attention_mask'])
 
-                    attention_mask = encoded_input['attention_mask']
-                    token_embeddings = model_output.last_hidden_state
-                    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-                    pooled = torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-                    normalized = torch_ff.normalize(pooled, p=2, dim=1)
+            # Normalize batch embeddings
+            batch_embeddings = torch_ff.normalize(batch_embeddings, p=2, dim=1)
 
-                    embeddings_list.append(normalized.cpu())
-                    break  # Success, exit retry loop
+            # Append batch embeddings to the list
+            embeddings_list.append(batch_embeddings)
+            del batch_embeddings, encoded_input
+            torch.cuda.empty_cache()
 
-                except RuntimeError as e:
-                    if "out of memory" in str(e):
-                        print(f"[WARN] OOM at batch {i // batch_size + 1}, retrying smaller batch.")
-                        torch.cuda.empty_cache()
-                        continue
-                    else:
-                        raise e
+        # Concatenate batch embeddings to get the final result
+        if len(embeddings_list) > 0:
+            embeddings = torch.cat(embeddings_list)
+        else:
+            embeddings = torch.empty(0)
 
-        if embeddings_list:
-            return torch.cat(embeddings_list, dim=0)
-        return torch.empty(0)
+        return embeddings
 
     def compute_similar_candidates(self, unique_values_sets: list, doc_emb: torch.Tensor, sim_threshold: float=0.9) -> dict:
         """Calculate similar candidates for each element in a list based on their embeddings.
@@ -1136,91 +1135,39 @@ class DataProcessor():
             cardinality > cardinality_lower_bound and cardinality < cardinality_ratio * max_cardinality
         ]
 
-    def string_feature_embed_similarity(
-        self,
-        data: pd.DataFrame,
-        column: str,
-        tokenizer: PreTrainedTokenizer,
-        model: PreTrainedModel,
-        similarity_threshold=0.70,
-        **kwargs
-    ) -> pd.Series:
+
+    def string_feature_embed_similarity(self, data: pd.DataFrame, column: str, tokenizer: PreTrainedTokenizer, model: PreTrainedModel, similarity_threshold=0.70, **kwargs) -> pd.Series:
+        """This function takes a DataFrame, a column name containing elements, and performs normalization
+        on the elements in the cell using embeddings and similarity scores.
+
+        Parameters:
+            data : The DataFrame containing the data.
+            column : The name of the column in the DataFrame that contains the elements.
+            tokenizer : The tokenizer associated with the transformer-based model.
+            model : The transformer-based model for encoding text.
+
+        Returns:
+            A Pandas Series containing the normalized elements based on the provided logic.
         """
-        Scalable, memory-efficient embedding similarity normalizer with original signature.
 
-        Accepts **kwargs for:
-            - chunk_size (default=5000)
-            - max_len (default=1024)
-            - cardinality_lower_bound (default=1)
-            - cardinality_ratio (default=0.75)
-            - cache_dir (optional temp path)
-        """
-        import tempfile
-        import shutil
+        # Create a set of unique elements from the specified column
+        unique_values_sets = [i.rstrip().lstrip() for i in list(set().union(*data[column].dropna())) if i]
+        doc_emb = self.encode_list_of_texts_batched(unique_values_sets, tokenizer, model, 1000)
 
-        chunk_size = kwargs.get("chunk_size", 5000)
-        max_len = kwargs.get("max_len", 1024)
-        cardinality_lower_bound = kwargs.get("cardinality_lower_bound", 1)
-        cardinality_ratio = kwargs.get("cardinality_ratio", 0.75)
-        cache_dir = kwargs.get("cache_dir") or tempfile.mkdtemp(prefix="embed_sim_")
+        # Create a dictionary of unique elements and their indices in the DataFrame
+        unique_element_dict = self.unique_elem_dict(data, column)
 
-        # Validate column
-        if column not in data.columns:
-            raise ValueError(f"Column '{column}' not found in DataFrame.")
+        # Calculate similar candidates for elements based on a similarity threshold
+        similar_candidates = self.compute_similar_candidates(unique_values_sets, doc_emb, similarity_threshold)
 
-        # Extract just the needed column
-        subset = data[[column]].dropna().copy()
-        subset.to_parquet(os.path.join(cache_dir, f"{column}.parquet"), index=True)
-        full_column = pd.read_parquet(os.path.join(cache_dir, f"{column}.parquet"))
+        # Apply the normalization function to the specified column
+        normalized_data_elements = data[column].apply(self.normalize_cell_elements,
+                                                            use_similarity=True,
+                                                           similar_candidates=similar_candidates,
+                                                           unique_element_dict=unique_element_dict,
+                                                     **kwargs)
 
-        indices = full_column.index.to_list()
-        normalized_chunks = []
-
-        for start in range(0, len(full_column), chunk_size):
-            end = start + chunk_size
-            chunk = full_column.iloc[start:end].copy()
-
-            if chunk.empty:
-                normalized_chunks.append(pd.Series([[]] * len(chunk), index=chunk.index))
-                continue
-
-            # Flatten to unique values
-            flat = list(set(
-                i.strip()[:max_len]
-                for sublist in chunk[column]
-                if isinstance(sublist, list)
-                for i in sublist if isinstance(i, str)
-            ))
-
-            if not flat:
-                normalized_chunks.append(pd.Series([[]] * len(chunk), index=chunk.index))
-                continue
-
-            embeddings = self.encode_list_of_texts_batched(flat, tokenizer, model, batch_size=256)
-            sim_matrix = torch.mm(embeddings, embeddings.T).cpu()
-
-            similar_candidates = {
-                value: [
-                    flat[j]
-                    for j in (sim_matrix[i] > similarity_threshold).nonzero().flatten().tolist()
-                    if j != i
-                ]
-                for i, value in enumerate(flat)
-            }
-
-            unique_dict = self.unique_elem_dict(chunk, column)
-            normalized = chunk[column].apply(
-                self.normalize_cell_elements,
-                use_similarity=True,
-                similar_candidates=similar_candidates,
-                unique_element_dict=unique_dict,
-                cardinality_lower_bound=cardinality_lower_bound,
-                cardinality_ratio=cardinality_ratio,
-            )
-            normalized_chunks.append(normalized)
-
-        shutil.rmtree(cache_dir)
-        return pd.concat(normalized_chunks)
+        return normalized_data_elements
 
 
     def normalize_column_using_popularity(self, data: pd.DataFrame, column: str, **kwargs):
@@ -1240,63 +1187,30 @@ class DataProcessor():
         return data[column].apply(self.normalize_cell_elements, use_similarity=False,unique_element_dict=unique_elements_obj, **kwargs)
 
 
-    def normalize_column_using_popularity(self, data: pd.DataFrame, column: str, max_workers: int = 8, **kwargs):
-        """
-        Normalize elements in the column using cardinality-based filtering with parallel processing.
-        """
-        if column not in data:
-            raise ValueError(f"Column '{column}' not found in the DataFrame.")
-
-        unique_elements_obj = self.unique_elem_dict(data, column)
-
-        def normalize_row(row):
-            return self.normalize_cell_elements(
-                row,
-                use_similarity=False,
-                unique_element_dict=unique_elements_obj,
-                **kwargs
-            )
-
-        # Use ThreadPoolExecutor to apply normalization in parallel
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            normalized_data = list(executor.map(normalize_row, data[column]))
-
-        return pd.Series(normalized_data, index=data.index)
-
-
     def one_hot_encode_list_column(self, large_dataframe: pd.DataFrame, column_name: str, to_lower=False) -> pd.DataFrame:
+        """One-hot encode a column in a DataFrame containing lists of strings.
+
+        Parameters:
+            large_dataframe (pd.DataFrame):
+                The DataFrame containing the data to be one-hot encoded.
+            column_name (str):
+                The name of the column in the DataFrame that contains lists of strings.
+
+        Returns:
+            A new DataFrame with the specified column one-hot encoded and concatenated
+            with the original DataFrame.
         """
-        One-hot encode a list-of-strings column, safely handling missing columns.
-        Returns an empty DataFrame (with same index) if the column is missing or all values are empty.
-        """
-        if column_name not in large_dataframe.columns:
-            print(f"[WARN] Column '{column_name}' not found — skipping one-hot encoding.")
-            return pd.DataFrame(index=large_dataframe.index)
-
-        # Drop rows with NaNs in the target column
-        col = large_dataframe[column_name].dropna()
-
-        if col.empty:
-            print(f"[WARN] Column '{column_name}' is empty after dropping NaNs.")
-            return pd.DataFrame(index=large_dataframe.index)
-
-        # Optional lowercase transform
+        # Create an instance of MultiLabelBinarizer
+        mlb = MultiLabelBinarizer()
         if to_lower:
-            col = col.apply(lambda x: list({i.lower() for i in x}) if isinstance(x, list) else x)
+            large_dataframe[column_name] = large_dataframe[column_name].apply(lambda x: list({i.lower() for i in x}))
+        # Fit and transform the specified column
+        one_hot_encoded = pd.DataFrame(mlb.fit_transform(large_dataframe[column_name]), columns=mlb.classes_)
 
-        # Now fit MultiLabelBinarizer
-        try:
-            mlb = MultiLabelBinarizer()
-            one_hot_encoded = pd.DataFrame(
-                mlb.fit_transform(col),
-                index=col.index,
-                columns=mlb.classes_
-            )
-            # Merge encoded data back into a full-index DataFrame
-            return one_hot_encoded.reindex(index=large_dataframe.index, fill_value=0)
-        except Exception as e:
-            print(f"[ERROR] Failed one-hot encoding column '{column_name}': {e}")
-            return pd.DataFrame(index=large_dataframe.index)
+        # Concatenate the one-hot encoded DataFrame with the original DataFrame
+        result = pd.concat([large_dataframe, one_hot_encoded], axis=1).drop(columns=[column_name])
+
+        return result
 
     def merge_and_relabel(self, df1, df2, merge_column, reference_label_col, other_label_col):
         """

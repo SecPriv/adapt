@@ -18,16 +18,6 @@ from .floss_general_feat import FlossFeatures
 from .util import DataProcessor, StringProcessing, Util
 
 
-import os
-import json
-import pandas as pd
-from copy import deepcopy
-
-import os
-import json
-import pandas as pd
-from copy import deepcopy
-
 class GroupAttributionFeatures:
     def __init__(self):
         conf = Config()
@@ -35,53 +25,29 @@ class GroupAttributionFeatures:
         self.raw_dataset_paths = conf.get_censys_filename()
         self.regex_result_path = conf.get_regex_filename()
 
-        self.default_normalized = {
-            "hash": "",
-            "service_serial_number": set(),
-            "asn": set(),
-            "country_code": set(),
-            "bgp_prefix": set(),
-            "issuer_organization": set(),
-            "cert_finger_print": set(),
-        }
-
-        self.default_regex_keys = {
-            "hash": "",
-            "URL": [], "ipaddress": [], "FilePath_1": [], "FilePath_2": [],
-            "md5": [], "sha1": [], "sha256": [], "Ethereum": [], "Bitcoin": [],
-            "EmailAddress": [], "SlackToken": [], "RSAprivatekey": [],
-            "SSHDSAprivatekey": [], "SSHECprivatekey": [], "PGPprivatekeyblock": [],
-            "GitHub": [], "GenericAPIKey": [], "GoogleAPIKey": [],
-            "GoogleGCPServiceaccount": [], "GoogleGmailAPIKey": [],
-            "GoogleGmailOAuth": [], "PayPalBraintreeAccessToken": [],
-            "TwitterAccessToken": [], "TwitterOAuth": []
-        }
-
-    def _clean_list(self, items):
-        if isinstance(items, list):
-            return list(set(filter(None, items)))
-        return items if items is not None else ""
-
     def get_ip_domain(self, normalize, obj):
-        asn = obj.get("autonomous_system", {})
-        location = obj.get("location", {})
-
-        if asn.get("asn"):
-            normalize["asn"].add(str(asn["asn"]))
-        if asn.get("bgp_prefix"):
-            normalize["bgp_prefix"].add(asn["bgp_prefix"])
-        if location.get("country_code"):
-            normalize["country_code"].add(location["country_code"])
-
-        for serv in obj.get("services", []):
-            if serv.get("certificate"):
-                normalize["service_serial_number"].add(serv["certificate"])
+        asn = obj.get("autonomous_system")
+        location = obj.get("location")
+        if asn:
+            if asn.get("asn"):
+                normalize["asn"].add(str(asn.get("asn")))
+            if asn.get("bgp_prefix"):
+                normalize["bgp_prefix"].add(asn.get("bgp_prefix"))
+        if location:
+            if location.get("country_code"):
+                normalize["country_code"].add(location.get("country_code"))
+        if obj.get("services"):
+            services = obj.get("services")
+            for serv in services:
+                if serv.get("certificate"):
+                    normalize["service_serial_number"].add(serv.get("certificate"))
         return normalize
 
     def get_hashes(self):
         raw_dataset_hashes = os.listdir(self.root_folder)
         raw_dataset_paths = [
-            f"{self.root_folder}{file}{self.raw_dataset_paths}" for file in raw_dataset_hashes
+            f"{self.root_folder}{file}{self.raw_dataset_paths}"
+            for file in raw_dataset_hashes
         ]
         return raw_dataset_hashes, raw_dataset_paths
 
@@ -89,100 +55,144 @@ class GroupAttributionFeatures:
         censys_results = []
         for f_hash in hashes:
             censys_features = {
-                "hash": f_hash,
+                "hash": "",
                 "ip_data": [],
                 "cert_data": [],
                 "domain_data": [],
             }
             try:
-                path_to_read = os.path.join(self.root_folder, f_hash, self.raw_dataset_paths)
-                with open(path_to_read, "r") as f:
-                    obj = json.load(f)
-
-                for _, cens_data in obj.items():
-                    censys_features["cert_data"].append(cens_data.get("CertificateData", []))
-                    censys_features["domain_data"].append(cens_data.get("DomainData", []))
-                    censys_features["ip_data"].append(cens_data.get("IPData", []))
+                path_to_read = os.path.join(
+                    os.path.join(self.root_folder, f_hash), self.raw_dataset_paths
+                )
+                obj = json.load(open(f"{path_to_read}"))
+                keys = obj.keys()
+                censys_features["hash"] = f_hash
+                for key in keys:
+                    cens_data = obj.get(key)
+                    if cens_data.get("CertificateData"):
+                        censys_features["cert_data"].append(
+                            cens_data.get("CertificateData")
+                        )
+                    if cens_data.get("DomainData"):
+                        censys_features["domain_data"].append(
+                            cens_data.get("DomainData")
+                        )
+                    if cens_data.get("IPData"):
+                        censys_features["ip_data"].append(cens_data.get("IPData"))
 
             except FileNotFoundError as fne:
-                print(f"[WARN] File not found for {f_hash}: {fne}")
+                print(f"File Not {fne}")
             except Exception as e:
-                print(f"[ERROR] Failed to load censys data for {f_hash}: {e}")
-            censys_results.append(censys_features)
+                print(f"File Not {fne}")
+            if censys_features:
+                censys_results.append(censys_features)
         return pd.DataFrame(censys_results)
 
-    def normalize_dataset(self, df: pd.DataFrame) -> list[dict]:
+    def normalize_dataset(self, df):
         normalized_results = []
-        for _, row in df.iterrows():
-            normalize = deepcopy(self.default_normalized)
-            normalize["hash"] = row.get("hash", "")
-
-            for domain_item in row.get("domain_data", []):
-                if domain_item:
-                    for sub_item in domain_item:
-                        for domain_dict in sub_item or []:
-                            if isinstance(domain_dict, dict):
-                                self.get_ip_domain(normalize, domain_dict)
-
-            for ip_item in row.get("ip_data", []):
-                if ip_item:
-                    self.get_ip_domain(normalize, ip_item)
-
-            for cert_item in row.get("cert_data", []):
-                for cert_dict in cert_item or []:
-                    if isinstance(cert_dict, dict):
-                        fingerprint = cert_dict.get("fingerprint_sha256")
-                        if fingerprint:
-                            normalize["cert_finger_print"].add(fingerprint)
-                        orgs = cert_dict.get("issuer_organization", [])
-                        if orgs and isinstance(orgs, list):
-                            normalize["issuer_organization"].add(orgs[0])
-
+        for idx, row in df.iterrows():
+            normalize = {
+                "hash": "",
+                "service_serial_number": set(),
+                "asn": set(),
+                "country_code": set(),
+                "bgp_prefix": set(),
+                "issuer_organization": set(),
+                "cert_finger_print": set(),
+            }
+            normalize["hash"] = row["hash"]
+            domain_data = row["domain_data"]
+            if len(domain_data) > 1:
+                for domain_item in domain_data:
+                    if not domain_item:
+                        break
+                    for sub_domain_item in domain_item:
+                        if not sub_domain_item:
+                            break
+                        for domain_dict in sub_domain_item:
+                            normalize = self.get_ip_domain(normalize, domain_dict)
+            ip_data = row["ip_data"]
+            if ip_data:
+                for ip_item in ip_data:
+                    if not ip_item:
+                        break
+                    normalize = self.get_ip_domain(normalize, ip_item)
+            cert_data = row["cert_data"]
+            if cert_data:
+                for cert_item in cert_data:
+                    if not cert_item:
+                        break
+                    for cert_dict in cert_item:
+                        fingerprint_sha256 = cert_dict.get("fingerprint_sha256")
+                        issuer_organization = cert_dict.get("issuer_organization")
+                        if fingerprint_sha256:
+                            normalize["cert_finger_print"].add(fingerprint_sha256)
+                        if issuer_organization:
+                            normalize["issuer_organization"].add(issuer_organization[0])
             normalized_results.append(normalize)
+
         return normalized_results
 
     def get_regex_dataset(self, hashes, drop_empty_rows=True):
+        """Get the regex features.
+        Args:
+            drop_empty_rows: Drops rows that do not meet a prevalence criteria.
+                This is to minimize the impact of empty elements in the clustering.
+        """
         regex_results = []
         for f_hash in hashes:
-            regex_data = deepcopy(self.default_regex_keys)
-            regex_data["hash"] = f_hash
+            regex_data = {
+                "hash": "",
+                "URL": [],
+                "ipaddress": [],
+                "FilePath_1": [],
+                "FilePath_2": [],
+                "md5": [],
+                "sha1": [],
+                "sha256": [],
+                "Ethereum": [],
+                "Bitcoin": [],
+                "EmailAddress": [],
+                "SlackToken": [],
+                "RSAprivatekey": [],
+                "SSHDSAprivatekey": [],
+                "SSHECprivatekey": [],
+                "PGPprivatekeyblock": [],
+                "GitHub": [],
+                "GenericAPIKey": [],
+                "GoogleAPIKey": [],
+                "GoogleGCPServiceaccount": [],
+                "GoogleGmailAPIKey": [],
+                "GoogleGmailOAuth": [],
+                "PayPalBraintreeAccessToken": [],
+                "TwitterAccessToken": [],
+                "TwitterOAuth": [],
+            }
             try:
-                regex_path = os.path.join(self.root_folder, f_hash, self.regex_result_path)
-                with open(regex_path, "r") as f:
-                    obj = json.load(f)
-
-                file_data = obj.get(f_hash, {})
-                for key in self.default_regex_keys:
-                    if key in file_data:
-                        regex_data[key] = self._clean_list(file_data[key])
+                regex_path = os.path.join(
+                    os.path.join(self.root_folder, f_hash), self.regex_result_path
+                )
+                obj = json.load(open(f"{regex_path}"))
+                regex_data = obj.get(f_hash)
+                for key in regex_data:
+                    if isinstance(regex_data[key], list) and None in regex_data[key]:
+                        regex_data[key].remove(None)
+                        regex_data[key] = list(set(regex_data[key]))
+                    if (
+                        not isinstance(regex_data[key], list)
+                        and regex_data[key] is None
+                    ):
+                        regex_data[key] = ""
             except FileNotFoundError:
-                continue
-            except Exception as e:
-                print(f"[ERROR] Regex load failed for {f_hash}: {e}")
-
-            non_empty = sum(bool(regex_data[k]) for k in regex_data if k != "hash")
-            if not drop_empty_rows or non_empty >= 2:
-                regex_results.append(regex_data)
+                pass
+            regex_data["hash"] = f_hash
+            non_empty_keys = sum(bool(regex_data[key]) for key in regex_data)
+            if drop_empty_rows:
+                if non_empty_keys < 2:
+                    continue
+            regex_results.append(regex_data)
         return regex_results
 
-    def ensure_all_columns(self, df, required_columns):
-        for col in required_columns:
-            if col not in df.columns:
-                print(f"[WARN] Column '{col}' not found — filling with defaults.")
-                df[col] = [[] for _ in range(len(df))]
-        return df
-
-    def generate_derived_columns(self, data):
-        required = ["Email"]
-        self.ensure_all_columns(data, required)
-
-        data["EmailAddressUsername"] = data["Email"].apply(
-            lambda x: [i.split("@")[0] for i in x] if isinstance(x, list) else []
-        )
-        data["EmailAddressDomain"] = data["Email"].apply(
-            lambda x: [i.split("@")[1] for i in x if "@" in i] if isinstance(x, list) else []
-        )
-        return data
 
 def clean_up_data(data):
     """We assume that all datasets will contain sets/lists of elements. Thus, we perform a cleanup here to fix cells that have null values.
@@ -235,41 +245,79 @@ class FeatureProcessor:
 
     SIMILARITY_THRESHOLD = {"default": 0.7, "LinuxPathClean": 0.8}
 
+    ABSOLUTE_FEATURES = [
+        "hash",
+        "service_serial_number",
+        "asn",
+        "country_code",
+        "bgp_prefix",
+        "issuer_organization",
+        "cert_finger_print",
+        "LinuxFilePath",
+        "MD5",
+        "WindowsFilePath",
+        "URL",
+        "IPv4",
+        "Bitcoin",
+        "Email",
+        "GitHub",
+        "GenericAPIKey",
+    ]
+
     EXCEPTION_COLUMNS = ["hash"]
 
     def process_features(self, joined_df):
+        # Select relevant columns
         data = self.select_and_clean_data(joined_df)
-        data = self.generate_derived_columns(data.copy())
+
+        # Generate derived columns
+        data_clone = data.copy()
+        data = self.generate_derived_columns(data_clone)
+
+        # Compute feature embeddings
         embeddings_data = self.compute_embeddings(data)
+
+        # Normalize absolute features
         normalized_features = self.normalize_absolute_features(embeddings_data)
+
+        # One-hot encode categorical features
         encoded_features = self.encode_categorical_features(normalized_features)
-        final_df = self.merge_features(encoded_features)
+
+        # Combine all features
+        combined_features = {**encoded_features}
+
+        # Merge all processed features into a single DataFrame
+        final_df = self.merge_features(combined_features)
+
         return final_df, embeddings_data, normalized_features
 
     def select_and_clean_data(self, df):
         return clean_up_data(df)
 
     def generate_derived_columns(self, data):
-        required_columns = ["Email", "LinuxFilePath", "IPv4", "Bitcoin", "MD5"]
-        for col in required_columns:
-            if col not in data.columns:
-                print(f"[WARN] Column '{col}' not found — filling with empty lists.")
-                data[col] = [[] for _ in range(len(data))]
-
         data["EmailAddressUsername"] = data["Email"].apply(
             lambda x: [i.split("@")[0] for i in x] if isinstance(x, list) else []
         )
         data["EmailAddressDomain"] = data["Email"].apply(
-            lambda x: [i.split("@")[1] for i in x if "@" in i] if isinstance(x, list) else []
+            lambda x: [i.split("@")[1] for i in x] if isinstance(x, list) else []
         )
         data["LinuxPathClean"] = data["LinuxFilePath"].apply(
-            lambda x: [i for i in x if self.data_processor.is_valid_unix_path(i)] if isinstance(x, list) else []
+            lambda x: (
+                [i for i in x if self.data_processor.is_valid_unix_path(i)]
+                if isinstance(x, list)
+                else []
+            )
         )
         data["IPAddressClean"] = data["IPv4"].apply(
-            lambda x: self.data_processor.validate_ip_addresses(x) if isinstance(x, list) else []
+            lambda x: (
+                [i for i in self.data_processor.validate_ip_addresses(x)]
+                if isinstance(x, list)
+                else []
+            )
         )
+        # Assume group_features provides methods for filtering valid data entries for the following columns
         data["BitCoinClean"] = data["Bitcoin"].apply(
-            lambda x: filter_valid_bitcoin_addresses(x) if isinstance(x, list) else []
+            lambda x: (filter_valid_bitcoin_addresses(x) if isinstance(x, list) else [])
         )
         data["MD5"] = data["MD5"].apply(
             lambda x: filter_valid_md5(x) if isinstance(x, list) else []
@@ -281,53 +329,53 @@ class FeatureProcessor:
         for column in data.columns:
             if column in self.EXCEPTION_COLUMNS:
                 continue
-            try:
-                sim_df = self.data_processor.string_feature_embed_similarity(
+            result[column] = pd.DataFrame(
+                self.data_processor.string_feature_embed_similarity(
                     data,
                     column,
                     self.tokenizer,
                     self.model,
-                    self.SIMILARITY_THRESHOLD.get(column, self.SIMILARITY_THRESHOLD["default"]),
+                    self.SIMILARITY_THRESHOLD.get(
+                        column, self.SIMILARITY_THRESHOLD["default"]
+                    ),
                 )
-                if not isinstance(sim_df, pd.DataFrame):
-                    sim_df = pd.DataFrame()
-                if column not in sim_df.columns:
-                    print(f"[WARN] Embedding output missing column '{column}' — filling with empty lists.")
-                    sim_df[column] = [[] for _ in range(len(data))]
-                result[column] = sim_df
-            except Exception as e:
-                print(f"[ERROR] Failed to embed feature '{column}': {e}")
-                result[column] = pd.DataFrame({column: [[] for _ in range(len(data))]})
+            )
+
         return result
 
     def normalize_absolute_features(self, embeddings_data):
         normalized_features = {}
-        for column, df in embeddings_data.items():
-            if column not in df.columns:
-                print(f"[WARN] Column '{column}' not found in embeddings — skipping normalization.")
-                normalized_features[column] = pd.DataFrame({column: [[] for _ in range(len(df))]})
-                continue
-            try:
-                if column == "MD5":
-                    normalized_column_data = self.data_processor.normalize_column_using_popularity(
-                        df, column, cardinality_lower_bound=4
+        for column in embeddings_data:
+            # Determine if a special cardinality_lower_bound needs to be applied
+            if column == "MD5":
+                normalized_column_data = (
+                    self.data_processor.normalize_column_using_popularity(
+                        embeddings_data[column], column, cardinality_lower_bound=4
                     )
-                else:
-                    normalized_column_data = self.data_processor.normalize_column_using_popularity(
-                        df, column
+                )
+            else:
+                normalized_column_data = (
+                    self.data_processor.normalize_column_using_popularity(
+                        embeddings_data[column], column
                     )
-                normalized_features[column] = pd.DataFrame(normalized_column_data)
-            except Exception as e:
-                print(f"[ERROR] Normalization failed for column '{column}': {e}")
-                normalized_features[column] = pd.DataFrame({column: [[] for _ in range(len(df))]})
+                )
+            # Convert the result into a DataFrame and store it in the dictionary
+            normalized_features[column] = pd.DataFrame(normalized_column_data)
+
         return normalized_features
 
     def encode_categorical_features(self, normalized_features):
         encoded_features = {}
-        for column, df in normalized_features.items():
-            encoded_df = self.data_processor.one_hot_encode_list_column(df, column)
+        for column in normalized_features:
+            encoded_df = self.data_processor.one_hot_encode_list_column(
+                normalized_features[column], column, True
+            )
             encoded_features[column] = encoded_df
         return encoded_features
+
+    def merge_features(self, feature_data_frames):
+        # Assuming all data frames are aligned and can be concatenated directly
+        return pd.concat(feature_data_frames.values(), axis=1)
 
     def merge_features(self, feature_data_frames):
         return pd.concat(feature_data_frames.values(), axis=1)
@@ -577,7 +625,7 @@ def process_and_merge_features(
     """
     # Initialize the feature processor and process joined_df
     feat_processor = FeatureProcessor()
-    merged_result, _, _ = feat_processor.process_features(joined_df)
+    merged_result, embeddings_data, normalized_features = feat_processor.process_features(joined_df)
     merged_result['hash'] = joined_df['hash']
     # Merge Exif and Malcat features with the processed result
     joined_df = exif_features.merge(merged_result, on="hash", how="inner")
@@ -585,6 +633,6 @@ def process_and_merge_features(
 
     # Merge with adversary dataset and drop the 'hash' column
     all_features = joined_df.merge(adversary_dataset[['hash', 'Normalized_Tag']], on="hash", how="inner")
-    print(f'''Number of unique Normalized Tags: {all_features['Normalized_Tag'].nunique()}''')
+    print(all_features['Normalized_Tag'].nunique())
 
     return all_features.drop(columns=['hash'])

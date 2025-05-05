@@ -14,7 +14,7 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfTransformer, TfidfVectorizer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import Normalizer
-import logging
+
 from .config import Config
 
 warnings.filterwarnings("ignore")
@@ -60,10 +60,7 @@ class FlossFeatures():
                     "strings": set()
                 }
                 if not os.path.isfile(floss_file):
-                    logging.info(f"error: hash {file_hash} doesn't have a floss file at {floss_file}")
-                    hashes_df.append(hashed_obj)
-                    continue
-                    # raise ValueError(f"error: hash {file_hash} doesn't have a floss file at {floss_file}")
+                    raise ValueError(f"error: hash {file_hash} doesn't have a floss file at {floss_file}")
                 try:
                     with open(floss_file) as f:
                         data = json.load(f)
